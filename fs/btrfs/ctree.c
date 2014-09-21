@@ -160,7 +160,7 @@ struct extent_buffer *btrfs_root_node(struct btrfs_root *root)
 		 * the inc_not_zero dance and if it doesn't work then
 		 * synchronize_rcu and try again.
 		 */
-		if (atomic_inc_not_zero(&eb->refs)) {
+		if (atomic_inc_not_zero(&eb_head(eb)->refs)) {
 			rcu_read_unlock();
 			break;
 		}
@@ -1772,7 +1772,7 @@ static noinline int generic_bin_search(struct extent_buffer *eb,
 	int err;
 
 	if (low > high) {
-		btrfs_err(eb->fs_info,
+		btrfs_err(eb_head(eb)->fs_info,
 		 "%s: low (%d) < high (%d) eb %llu owner %llu level %d",
 			  __func__, low, high, eb->start,
 			  btrfs_header_owner(eb), btrfs_header_level(eb));
