@@ -6600,15 +6600,11 @@ int btrfs_read_sys_array(struct btrfs_root *root)
 	u64 type;
 	struct btrfs_key key;
 
-	ASSERT(BTRFS_SUPER_INFO_SIZE <= root->nodesize);
-	/*
-	 * This will create extent buffer of nodesize, superblock size is
-	 * fixed to BTRFS_SUPER_INFO_SIZE. If nodesize > sb size, this will
-	 * overallocate but we can keep it as-is, only the first page is used.
-	 */
-	sb = btrfs_find_create_tree_block(root, BTRFS_SUPER_INFO_OFFSET);
+	sb = btrfs_find_create_tree_block(root, BTRFS_SUPER_INFO_OFFSET,
+					  BTRFS_SUPER_INFO_SIZE);
 	if (IS_ERR(sb))
 		return PTR_ERR(sb);
+
 	set_extent_buffer_uptodate(sb);
 	btrfs_set_buffer_lockdep_class(root->root_key.objectid, sb, 0);
 	/*
