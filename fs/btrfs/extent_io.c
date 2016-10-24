@@ -3122,6 +3122,7 @@ static int __do_readpage(struct extent_io_tree *tree,
 		}
 
 		iosize = min(extent_map_end(em) - cur, end - cur + 1);
+		iosize = min(iosize, blocksize);
 		cur_end = min(extent_map_end(em) - 1, end);
 		iosize = ALIGN(iosize, blocksize);
 		if (this_bio_flag & EXTENT_BIO_COMPRESSED) {
