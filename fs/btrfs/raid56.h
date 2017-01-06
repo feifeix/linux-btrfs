@@ -19,6 +19,14 @@
 
 #ifndef __BTRFS_RAID56__
 #define __BTRFS_RAID56__
+
+#define DEBUG_RAID56	0
+#if DEBUG_RAID56
+#define pr_debug_raid56(fmt, args...)	printk(fmt, ##args);
+#else
+#define pr_debug_raid56(fmt, args...)
+#endif
+
 static inline int nr_parity_stripes(struct map_lookup *map)
 {
 	if (map->type & BTRFS_BLOCK_GROUP_RAID5)

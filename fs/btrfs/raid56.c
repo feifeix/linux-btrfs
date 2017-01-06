@@ -1068,9 +1068,10 @@ static int rbio_add_io_page(struct btrfs_raid_bio *rbio,
 			    struct page *page,
 			    int stripe_nr,
 			    unsigned long page_index,
-			    unsigned long bio_max_len)
+			    unsigned long bio_max_len,
+			    unsigned int blocksize)
 {
-	struct bio *last = bio_list->tail;
+	struct bio *last;
 	u64 last_end = 0;
 	int ret;
 	struct bio *bio;
@@ -1079,12 +1080,20 @@ static int rbio_add_io_page(struct btrfs_raid_bio *rbio,
 
 	stripe = &rbio->bbio->stripes[stripe_nr];
 	disk_start = stripe->physical + (page_index << PAGE_SHIFT);
+	int pg_offset = 0;
 
 	/* if the device is missing, just fail this stripe */
 	if (!stripe->dev->bdev)
 		return fail_rbio_index(rbio, stripe_nr);
 
-	/* see if we can add this page onto our existing bio */
+	/*
+	 * In subpage-blocksize scenario, blocks in one page might not be contiguous.
+	 * Since we can't merge non-contiguous blocks into one bio, new bios
+	 * might be added to the bio_list at the end of this function(bio_list_add).
+	 */
+next_block:
+	last = bio_list->tail;
+	/* see if we can add this block onto our existing bio */
 	if (last) {
 		last_end = (u64)last->bi_iter.bi_sector << 9;
 		last_end += last->bi_iter.bi_size;
@@ -1096,13 +1105,22 @@ static int rbio_add_io_page(struct btrfs_raid_bio *rbio,
 		if (last_end == disk_start && stripe->dev->bdev &&
 		    !last->bi_error &&
 		    last->bi_bdev == stripe->dev->bdev) {
-			ret = bio_add_page(last, page, PAGE_SIZE, 0);
-			if (ret == PAGE_SIZE)
-				return 0;
+			ret = bio_add_page(last, page, blocksize, pg_offset);
+			/*move to next block until all blocks in a page been processed.
+			* Return 0 when all blocks in a page been processed.
+			*/
+			if (ret == blocksize){
+				pg_offset += blocksize;
+				disk_start += blocksize;
+				if (pg_offset < PAGE_SIZE)
+					goto next_block;
+				else
+					return 0;
+			}
 		}
 	}
 
-	/* put a new bio on the list */
+	/* put a new bio on the list if the block cannot be added to our existing bio*/
 	bio = btrfs_io_bio_alloc(GFP_NOFS, bio_max_len >> PAGE_SHIFT?:1);
 	if (!bio)
 		return -ENOMEM;
@@ -1111,8 +1129,14 @@ static int rbio_add_io_page(struct btrfs_raid_bio *rbio,
 	bio->bi_bdev = stripe->dev->bdev;
 	bio->bi_iter.bi_sector = disk_start >> 9;
 
-	bio_add_page(bio, page, PAGE_SIZE, 0);
+	ret = bio_add_page(bio, page, blocksize, pg_offset);
 	bio_list_add(bio_list, bio);
+	if (ret == blocksize){
+		pg_offset += blocksize;
+		disk_start += blocksize;
+	}
+	if (pg_offset < PAGE_SIZE)
+		goto next_block;
 	return 0;
 }
 
@@ -1179,6 +1203,8 @@ static noinline void finish_rmw(struct btrfs_raid_bio *rbio)
 	int nr_data = rbio->nr_data;
 	int stripe;
 	int pagenr;
+	unsigned int blocksize;
+	blocksize = rbio->fs_info->sb->s_blocksize;
 	int p_stripe = -1;
 	int q_stripe = -1;
 	struct bio_list bio_list;
@@ -1278,7 +1304,7 @@ static noinline void finish_rmw(struct btrfs_raid_bio *rbio)
 			}
 
 			ret = rbio_add_io_page(rbio, &bio_list,
-				       page, stripe, pagenr, rbio->stripe_len);
+				       page, stripe, pagenr, rbio->stripe_len, blocksize);
 			if (ret)
 				goto cleanup;
 		}
@@ -1303,7 +1329,7 @@ static noinline void finish_rmw(struct btrfs_raid_bio *rbio)
 
 			ret = rbio_add_io_page(rbio, &bio_list, page,
 					       rbio->bbio->tgtdev_map[stripe],
-					       pagenr, rbio->stripe_len);
+					       pagenr, rbio->stripe_len, blocksize);
 			if (ret)
 				goto cleanup;
 		}
@@ -1509,6 +1535,8 @@ static int raid56_rmw_stripe(struct btrfs_raid_bio *rbio)
 	int stripe;
 	struct bio *bio;
 
+	unsigned int blocksize;
+	blocksize = rbio->fs_info->sb->s_blocksize;
 	bio_list_init(&bio_list);
 
 	ret = alloc_rbio_pages(rbio);
@@ -1544,7 +1572,7 @@ static int raid56_rmw_stripe(struct btrfs_raid_bio *rbio)
 				continue;
 
 			ret = rbio_add_io_page(rbio, &bio_list, page,
-				       stripe, pagenr, rbio->stripe_len);
+				       stripe, pagenr, rbio->stripe_len, blocksize);
 			if (ret)
 				goto cleanup;
 		}
@@ -2032,6 +2060,9 @@ static int __raid56_parity_recover(struct btrfs_raid_bio *rbio)
 	int stripe;
 	struct bio *bio;
 
+	unsigned int blocksize;
+	blocksize = rbio->fs_info->sb->s_blocksize;
+
 	bio_list_init(&bio_list);
 
 	ret = alloc_rbio_pages(rbio);
@@ -2053,7 +2084,6 @@ static int __raid56_parity_recover(struct btrfs_raid_bio *rbio)
 
 		for (pagenr = 0; pagenr < rbio->stripe_npages; pagenr++) {
 			struct page *p;
-
 			/*
 			 * the rmw code may have already read this
 			 * page in
@@ -2064,7 +2094,7 @@ static int __raid56_parity_recover(struct btrfs_raid_bio *rbio)
 
 			ret = rbio_add_io_page(rbio, &bio_list,
 				       rbio_stripe_page(rbio, stripe, pagenr),
-				       stripe, pagenr, rbio->stripe_len);
+				       stripe, pagenr, rbio->stripe_len, blocksize);
 			if (ret < 0)
 				goto cleanup;
 		}
@@ -2297,6 +2327,8 @@ static noinline void finish_parity_scrub(struct btrfs_raid_bio *rbio,
 	struct bio *bio;
 	int is_replace = 0;
 	int ret;
+	unsigned int blocksize;
+	blocksize = rbio->fs_info->sb->s_blocksize;
 
 	bio_list_init(&bio_list);
 
@@ -2397,7 +2429,7 @@ writeback:
 
 		page = rbio_stripe_page(rbio, rbio->scrubp, pagenr);
 		ret = rbio_add_io_page(rbio, &bio_list,
-			       page, rbio->scrubp, pagenr, rbio->stripe_len);
+			       page, rbio->scrubp, pagenr, rbio->stripe_len, blocksize);
 		if (ret)
 			goto cleanup;
 	}
@@ -2411,7 +2443,7 @@ writeback:
 		page = rbio_stripe_page(rbio, rbio->scrubp, pagenr);
 		ret = rbio_add_io_page(rbio, &bio_list, page,
 				       bbio->tgtdev_map[rbio->scrubp],
-				       pagenr, rbio->stripe_len);
+				       pagenr, rbio->stripe_len, blocksize);
 		if (ret)
 			goto cleanup;
 	}
@@ -2548,6 +2580,9 @@ static void raid56_parity_scrub_stripe(struct btrfs_raid_bio *rbio)
 	int stripe;
 	struct bio *bio;
 
+	unsigned int blocksize;
+	blocksize = rbio->fs_info->sb->s_blocksize;
+
 	ret = alloc_rbio_essential_pages(rbio);
 	if (ret)
 		goto cleanup;
@@ -2581,7 +2616,7 @@ static void raid56_parity_scrub_stripe(struct btrfs_raid_bio *rbio)
 				continue;
 
 			ret = rbio_add_io_page(rbio, &bio_list, page,
-				       stripe, pagenr, rbio->stripe_len);
+				       stripe, pagenr, rbio->stripe_len, blocksize);
 			if (ret)
 				goto cleanup;
 		}
